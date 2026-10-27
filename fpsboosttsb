@@ -1,0 +1,403 @@
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Lighting         = game:GetService("Lighting")
+local Workspace        = game:GetService("Workspace")
+
+local player    = Players.LocalPlayer or Players:WaitForChildOfClass("Player")
+local playerGui = player:WaitForChild("PlayerGui", 15)
+if not playerGui then return end
+
+for _, old in ipairs(playerGui:GetChildren()) do
+    if old.Name and old.Name:match("ArtecHub") then old:Destroy() end
+end
+
+local korbloxEnabled   = false
+local headlessEnabled  = false
+local fpsBoostEnabled  = false
+local menuShown        = true
+
+local savedProps       = {} 
+local connections      = {}
+local savedQuality     = nil
+local savedLighting    = nil
+
+local KORBLOX_PARTS = { "RightUpperLeg", "RightLowerLeg", "RightFoot", "Right Leg" }
+
+local function applyFakeKorblox(char)
+    if not char then return end
+    pcall(function()
+        for _, name in ipairs(KORBLOX_PARTS) do
+            local part = char:FindFirstChild(name)
+            if part and part:IsA("BasePart") then part.Transparency = 1 end
+        end
+    end)
+end
+
+local function removeFakeKorblox(char)
+    if not char then return end
+    pcall(function()
+        for _, name in ipairs(KORBLOX_PARTS) do
+            local part = char:FindFirstChild(name)
+            if part and part:IsA("BasePart") then part.Transparency = 0 end
+        end
+    end)
+end
+
+local function applyFakeHeadless(char)
+    if not char then return end
+    pcall(function()
+        local head = char:FindFirstChild("Head")
+        if head then
+            head.Transparency = 1
+            for _, child in pairs(head:GetChildren()) do
+                if child:IsA("Decal") or child:IsA("Texture") then child.Transparency = 1 end
+            end
+        end
+        for _, acc in pairs(char:GetChildren()) do
+            if acc:IsA("Accessory") then
+                local handle = acc:FindFirstChild("Handle")
+                if handle and handle:IsA("BasePart") then
+                    local isHeadAcc = false
+                    for _, child in pairs(handle:GetChildren()) do
+                        if child:IsA("Attachment") then
+                            local aName = string.lower(child.Name)
+                            if string.find(aName, "hat") or string.find(aName, "hair")
+                            or string.find(aName, "face") or string.find(aName, "head") then
+                                isHeadAcc = true; break
+                            end
+                        end
+                    end
+                    if not isHeadAcc then
+                        for _, weld in pairs(handle:GetChildren()) do
+                            if weld:IsA("Weld") or weld:IsA("Motor6D") or weld:IsA("WeldConstraint") then
+                                if weld.Part0 == head or weld.Part1 == head then isHeadAcc = true; break end
+                            end
+                        end
+                    end
+                    if isHeadAcc or acc.AccessoryType == Enum.AccessoryType.Hat 
+                    or acc.AccessoryType == Enum.AccessoryType.Hair 
+                    or acc.AccessoryType == Enum.AccessoryType.Face then
+                        handle.Transparency = 1
+                        for _, sub in pairs(handle:GetDescendants()) do
+                            if sub:IsA("BasePart") or sub:IsA("MeshPart")
+                            or sub:IsA("Decal") or sub:IsA("Texture") then
+                                sub.Transparency = 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function removeFakeHeadless(char)
+    if not char then return end
+    pcall(function()
+        local head = char:FindFirstChild("Head")
+        if head then
+            head.Transparency = 0
+            for _, child in pairs(head:GetChildren()) do
+                if child:IsA("Decal") or child:IsA("Texture") then child.Transparency = 0 end
+            end
+        end
+        for _, acc in pairs(char:GetChildren()) do
+            if acc:IsA("Accessory") then
+                local handle = acc:FindFirstChild("Handle")
+                if handle and handle:IsA("BasePart") then
+                    handle.Transparency = 0
+                    for _, sub in pairs(handle:GetDescendants()) do
+                        if sub:IsA("BasePart") or sub:IsA("MeshPart")
+                        or sub:IsA("Decal") or sub:IsA("Texture") then
+                            sub.Transparency = 0
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function trackProperty(obj, prop, val)
+    pcall(function()
+        local alreadyTracked = false
+        for _, item in ipairs(savedProps) do
+            if item.obj == obj and item.prop == prop then
+                alreadyTracked = true
+                break
+            end
+        end
+        if not alreadyTracked then
+            table.insert(savedProps, {obj = obj, prop = prop, val = obj[prop]})
+            obj[prop] = val
+        end
+    end)
+end
+
+local function stripObjectAdvanced(obj)
+    pcall(function()
+        if obj:IsA("BasePart") then
+            if obj.CastShadow then trackProperty(obj, "CastShadow", false) end
+            if obj.Material ~= Enum.Material.SmoothPlastic then trackProperty(obj, "Material", Enum.Material.SmoothPlastic) end
+            
+            for _, child in pairs(obj:GetChildren()) do
+                if child:IsA("Decal") or child:IsA("Texture") then
+                    if child.Transparency < 1 then trackProperty(child, "Transparency", 1) end
+                end
+            end
+        elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Light") then
+            if obj.Enabled then trackProperty(obj, "Enabled", false) end
+        elseif obj:IsA("Accessory") then
+            local handle = obj:FindFirstChild("Handle")
+            if handle then
+                if handle.Transparency < 1 then trackProperty(handle, "Transparency", 1) end
+                for _, child in pairs(handle:GetDescendants()) do
+                    if (child:IsA("BasePart") or child:IsA("Decal") or child:IsA("Texture")) and child.Transparency < 1 then
+                        trackProperty(child, "Transparency", 1)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function enableAdvancedFps()
+    pcall(function()
+        savedQuality = settings().Rendering.QualityLevel
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+
+    savedLighting = {
+        GlobalShadows = Lighting.GlobalShadows,
+        EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale,
+        EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+    }
+
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.EnvironmentDiffuseScale = 0
+        Lighting.EnvironmentSpecularScale = 0
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("PostEffect") or obj:IsA("Atmosphere") or obj:IsA("Sky") then
+                if obj.Enabled then trackProperty(obj, "Enabled", false) end
+            end
+        end
+    end)
+
+    pcall(function()
+        local terrain = Workspace:FindFirstChildOfClass("Terrain")
+        if terrain then
+            trackProperty(terrain, "WaterWaveSize", 0)
+            trackProperty(terrain, "WaterWaveSpeed", 0)
+            trackProperty(terrain, "DecorationEnabled", false)
+        end
+    end)
+
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        stripObjectAdvanced(obj)
+    end
+
+    if connections[1] then connections[1]:Disconnect() end
+    connections[1] = Workspace.DescendantAdded:Connect(function(obj)
+        if fpsBoostEnabled then stripObjectAdvanced(obj) end
+    end)
+
+    pcall(function() if setfpscap then setfpscap(240) end end)
+end
+
+local function disableAdvancedFps()
+    pcall(function()
+        if savedQuality then settings().Rendering.QualityLevel = savedQuality end
+        if savedLighting then
+            Lighting.GlobalShadows = savedLighting.GlobalShadows
+            Lighting.EnvironmentDiffuseScale = savedLighting.EnvironmentDiffuseScale
+            Lighting.EnvironmentSpecularScale = savedLighting.EnvironmentSpecularScale
+        end
+    end)
+
+    for _, item in ipairs(savedProps) do
+        pcall(function()
+            if item.obj and item.obj.Parent then
+                item.obj[item.prop] = item.val
+            end
+        end)
+    end
+    table.clear(savedProps)
+
+    if connections[1] then connections[1]:Disconnect() connections[1] = nil end
+
+    pcall(function() if setfpscap then setfpscap(0) end end)
+end
+
+player.CharacterAdded:Connect(function(char)
+    task.wait(0.5)
+    if korbloxEnabled  then applyFakeKorblox(char)  end
+    if headlessEnabled then applyFakeHeadless(char) end
+    if fpsBoostEnabled then
+        for _, obj in ipairs(char:GetDescendants()) do stripObjectAdvanced(obj) end
+    end
+end)
+
+local ACCENT     = Color3.fromRGB(255, 255, 255)
+local BG         = Color3.fromRGB(10, 10, 10)
+local CARD       = Color3.fromRGB(24, 24, 24)
+local SWITCH_OFF = Color3.fromRGB(45, 45, 45)
+local TEXT       = Color3.fromRGB(235, 235, 235)
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "ArtecHubUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder = 999
+gui.Parent = playerGui
+
+local main = Instance.new("Frame")
+main.Name = "ArtecHubMain"
+main.Size = UDim2.new(0, 252, 0, 208)
+main.Position = UDim2.new(0.5, -126, 0.4, 0)
+main.BackgroundColor3 = BG
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 14)
+
+local mainStroke = Instance.new("UIStroke", main)
+mainStroke.Color = ACCENT
+mainStroke.Thickness = 1.4
+mainStroke.Transparency = 0.5
+
+local uiScale = Instance.new("UIScale", main)
+uiScale.Scale = 1
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 42)
+header.BackgroundColor3 = CARD
+header.BorderSizePixel = 0
+header.Parent = main
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 14)
+
+local headerPatch = Instance.new("Frame")
+headerPatch.Size = UDim2.new(1, 0, 0, 12)
+headerPatch.Position = UDim2.new(0, 0, 1, -12)
+headerPatch.BackgroundColor3 = CARD
+headerPatch.BorderSizePixel = 0
+headerPatch.Parent = header
+
+local title = Instance.new("TextLabel")
+title.BackgroundTransparency = 1
+title.Position = UDim2.new(0, 14, 0, 0)
+title.Size = UDim2.new(1, -28, 1, 0)
+title.Font = Enum.Font.GothamBlack
+title.Text = "Artec Hub"
+title.TextSize = 15
+title.TextColor3 = ACCENT
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = header
+
+local function createToggle(labelText, yPos, onChanged)
+    local state = false
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, -24, 0, 42)
+    row.Position = UDim2.new(0, 12, 0, yPos)
+    row.BackgroundColor3 = CARD
+    row.Text = ""
+    row.AutoButtonColor = false
+    row.Parent = main
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 10)
+
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.new(1, -70, 1, 0)
+    label.Position = UDim2.new(0, 12, 0, 0)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 12
+    label.TextColor3 = TEXT
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Text = labelText
+    label.Parent = row
+
+    local sw = Instance.new("Frame")
+    sw.AnchorPoint = Vector2.new(1, 0.5)
+    sw.Position = UDim2.new(1, -10, 0.5, 0)
+    sw.Size = UDim2.new(0, 38, 0, 20)
+    sw.BackgroundColor3 = SWITCH_OFF
+    sw.BorderSizePixel = 0
+    sw.Parent = row
+    Instance.new("UICorner", sw).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.Position = UDim2.new(0, 3, 0.5, -7)
+    knob.BackgroundColor3 = Color3.fromRGB(130, 130, 130)
+    knob.BorderSizePixel = 0
+    knob.Parent = sw
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local function render(animate)
+        local info = animate and TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out) or TweenInfo.new(0)
+        TweenService:Create(knob, info, {
+            Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7),
+            BackgroundColor3 = state and Color3.fromRGB(20, 20, 20) or Color3.fromRGB(130, 130, 130)
+        }):Play()
+        TweenService:Create(sw, info, {
+            BackgroundColor3 = state and ACCENT or SWITCH_OFF
+        }):Play()
+    end
+
+    row.MouseButton1Click:Connect(function()
+        state = not state
+        render(true)
+        onChanged(state)
+    end)
+end
+
+createToggle("Fake Korblox", 54, function(v)
+    korbloxEnabled = v
+    if v then applyFakeKorblox(player.Character) else removeFakeKorblox(player.Character) end
+end)
+
+createToggle("Fake Headless", 104, function(v)
+    headlessEnabled = v
+    if v then applyFakeHeadless(player.Character) else removeFakeHeadless(player.Character) end
+end)
+
+createToggle("FPS Boost", 154, function(v)
+    fpsBoostEnabled = v
+    if v then enableAdvancedFps() else disableAdvancedFps() end
+end)
+
+local function setMenuVisible(shown)
+    menuShown = shown
+    main.Visible = shown
+    if shown then
+        uiScale.Scale = 0.8
+        TweenService:Create(uiScale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.M then
+        setMenuVisible(not menuShown)
+    end
+end)
+
+local dragging, dragStart, startPos = false, nil, nil
+main.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
